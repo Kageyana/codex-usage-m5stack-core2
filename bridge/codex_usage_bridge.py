@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 import queue
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 FIVE_HOUR_MINUTES = 300
@@ -36,18 +38,23 @@ class CodexAppServer:
         self.stdout_thread: threading.Thread | None = None
 
     def start(self) -> None:
-        exe = shutil.which(self.codex_bin) or self.codex_bin
+        exe = resolve_codex_executable(self.codex_bin)
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        self.proc = subprocess.Popen(
-            [exe, "app-server", "--listen", "stdio://"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            bufsize=1,
-            creationflags=creationflags,
-        )
+        try:
+            self.proc = subprocess.Popen(
+                [exe, "app-server", "--listen", "stdio://"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                bufsize=1,
+                creationflags=creationflags,
+            )
+        except FileNotFoundError as exc:
+            raise AppServerError(
+                f"Codex CLI not found: {exe}. Install Codex or specify --codex-bin PATH"
+            ) from exc
         self.stdout_thread = threading.Thread(target=self._stdout_loop, daemon=True)
         self.stderr_thread = threading.Thread(target=self._stderr_loop, daemon=True)
         self.stdout_thread.start()
@@ -143,6 +150,29 @@ class CodexAppServer:
 
     def read_rate_limits(self) -> dict[str, Any]:
         return self.request("account/rateLimits/read", timeout=20)
+
+
+def resolve_codex_executable(codex_bin: str) -> str:
+    resolved = shutil.which(codex_bin)
+    if resolved:
+        return resolved
+
+    if os.name != "nt" or Path(codex_bin).name.lower() not in {"codex", "codex.exe"}:
+        return codex_bin
+
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if not local_appdata:
+        return codex_bin
+
+    install_root = Path(local_appdata) / "OpenAI" / "Codex" / "bin"
+    candidates = [path for path in install_root.glob("*/codex.exe") if path.is_file()]
+    direct = install_root / "codex.exe"
+    if direct.is_file():
+        candidates.append(direct)
+    if not candidates:
+        return codex_bin
+
+    return str(max(candidates, key=lambda path: path.stat().st_mtime_ns))
 
 
 @dataclass
@@ -250,7 +280,7 @@ def build_payload(result: dict[str, Any]) -> dict[str, Any]:
         "credits": {
             "available": bool(credits.get("hasCredits", False)),
             "unlimited": bool(credits.get("unlimited", False)),
-            "balance": str(credits.get("balance", "--")),
+            "balance": format_credit_balance(credits.get("balance")),
         },
     }
 
@@ -262,6 +292,18 @@ def error_payload(message: str) -> dict[str, Any]:
         "updated": datetime.now().strftime("%H:%M:%S"),
         "error": message[:180],
     }
+
+
+def format_credit_balance(value: Any) -> str:
+    if value is None:
+        return "--"
+    text = str(value).strip()
+    if not text:
+        return "--"
+    try:
+        return str(Decimal(text).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    except (InvalidOperation, ValueError):
+        return "--"
 
 
 def find_core2_port(explicit: str | None) -> str:
@@ -299,6 +341,12 @@ def main() -> int:
     parser.add_argument("--port", help="M5Stack COM port, e.g. COM7")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--interval", type=float, default=30.0, help="Codex refresh interval in seconds")
+    parser.add_argument(
+        "--reconnect-interval",
+        type=float,
+        default=2.0,
+        help="Seconds to wait before retrying after a serial/app-server disconnect",
+    )
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--demo", action="store_true", help="Send sample values without starting Codex")
     args = parser.parse_args()
@@ -308,32 +356,88 @@ def main() -> int:
     except ImportError as exc:
         raise SystemExit("pyserial is required: pip install -r requirements.txt") from exc
 
-    port = find_core2_port(args.port)
-    print(f"M5Stack: {port} @ {args.baud}")
-
     app: CodexAppServer | None = None
     try:
-        with serial.Serial(port, args.baud, timeout=1, write_timeout=2) as ser:
-            time.sleep(1.5)
-            if not args.demo:
-                app = CodexAppServer(args.codex_bin)
-                app.start()
-                print("Codex app-server initialized")
+        while True:
+            try:
+                port = find_core2_port(args.port)
+                print(f"M5Stack: connecting to {port} @ {args.baud}")
 
-            while True:
+                with serial.Serial(port, args.baud, timeout=1, write_timeout=2) as ser:
+                    print(f"M5Stack: connected to {port}")
+                    time.sleep(1.5)
+
+                    serial_lock = threading.Lock()
+                    heartbeat_stop = threading.Event()
+                    heartbeat_error: queue.Queue[RuntimeError] = queue.Queue(maxsize=1)
+
+                    def send_serial_payload(message: dict[str, Any]) -> None:
+                        try:
+                            encoded = (json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8")
+                            with serial_lock:
+                                ser.write(encoded)
+                                ser.flush()
+                        except (serial.SerialException, OSError) as exc:
+                            raise RuntimeError(f"M5Stack connection lost: {exc}") from exc
+
+                    def send_heartbeat() -> None:
+                        while not heartbeat_stop.wait(1.0):
+                            try:
+                                send_serial_payload({"type": "codex_heartbeat"})
+                            except RuntimeError as exc:
+                                try:
+                                    heartbeat_error.put_nowait(exc)
+                                except queue.Full:
+                                    pass
+                                return
+
+                    heartbeat_thread = threading.Thread(target=send_heartbeat, daemon=True)
+                    heartbeat_thread.start()
+
+                    try:
+                        if not args.demo:
+                            app = CodexAppServer(args.codex_bin)
+                            app.start()
+                            print("Codex app-server initialized")
+
+                        while True:
+                            try:
+                                heartbeat_error.get_nowait()
+                            except queue.Empty:
+                                pass
+                            else:
+                                raise RuntimeError("M5Stack connection lost during heartbeat")
+
+                            try:
+                                result = demo_result() if args.demo else app.read_rate_limits()  # type: ignore[union-attr]
+                                payload = build_payload(result)
+                                print(json.dumps(payload, ensure_ascii=False))
+                            except Exception as exc:
+                                payload = error_payload(str(exc))
+                                print(f"ERROR: {exc}", file=sys.stderr)
+
+                            send_serial_payload(payload)
+
+                            time.sleep(max(5.0, args.interval))
+                    finally:
+                        heartbeat_stop.set()
+                        heartbeat_thread.join(timeout=2)
+            except KeyboardInterrupt:
+                return 0
+            except (serial.SerialException, OSError, RuntimeError, AppServerError) as exc:
+                print(
+                    f"Connection unavailable: {exc}; retrying in "
+                    f"{max(1.0, args.reconnect_interval):g}s",
+                    file=sys.stderr,
+                )
                 try:
-                    result = demo_result() if args.demo else app.read_rate_limits()  # type: ignore[union-attr]
-                    payload = build_payload(result)
-                    print(json.dumps(payload, ensure_ascii=False))
-                except Exception as exc:
-                    payload = error_payload(str(exc))
-                    print(f"ERROR: {exc}", file=sys.stderr)
-
-                ser.write((json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8"))
-                ser.flush()
-                time.sleep(max(5.0, args.interval))
-    except KeyboardInterrupt:
-        return 0
+                    time.sleep(max(1.0, args.reconnect_interval))
+                except KeyboardInterrupt:
+                    return 0
+            finally:
+                if app:
+                    app.close()
+                    app = None
     finally:
         if app:
             app.close()
