@@ -72,6 +72,8 @@ Check that Codex is available:
 codex --version
 ```
 
+If `codex` is not on PATH, the Windows bridge also searches the standard Codex Desktop installation directory. Use `--codex-bin PATH` to override it.
+
 ## 3. Test the display without Codex
 
 The bridge can auto-detect common Core2 USB serial chips. If auto-detection fails, specify `--port COM7` (replace with your port).
@@ -99,6 +101,14 @@ Default refresh interval is 30 seconds. To use 60 seconds:
 ```powershell
 python codex_usage_bridge.py --port COM7 --interval 60
 ```
+
+The bridge keeps running when the M5Stack is unplugged and retries the serial connection automatically. To run it from a PowerShell watchdog that also restarts the bridge process after a failure:
+
+```powershell
+.\run_bridge.ps1 -Port COM6
+```
+
+The watchdog checks the COM port every two seconds. Stop it with `Ctrl+C`.
 
 The bridge performs the app-server handshake and calls:
 
@@ -147,5 +157,11 @@ One JSON object is sent per line. Example:
 ## Notes
 
 Codex may not always report both rolling windows. When the 5-hour window is absent, the Core2 displays `Not reported by Codex` instead of guessing a value.
+
+Credits balance is rounded to the nearest integer for display. A missing or invalid balance is shown as `--`.
+
+The Core2 renders the fixed layout only once. On later updates it redraws only the changed status, usage window, credits, footer, or error region to reduce display flicker.
+
+The bridge sends a one-second heartbeat independently of the Codex refresh interval. If the Core2 receives no data or heartbeat from the PC for 30 seconds after a connection has been established, it displays a disconnect message and powers itself off.
 
 This project intentionally talks to the local Codex app-server instead of reading OAuth files directly.
