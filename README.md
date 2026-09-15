@@ -164,7 +164,7 @@ Credits balance is rounded to the nearest integer for display. A missing or inva
 
 The Core2 renders the fixed layout only once. On later updates it redraws only the changed status, usage window, credits, footer, or error region to reduce display flicker.
 
-The bridge sends a one-second heartbeat independently of the Codex refresh interval. Codex usage is read every 30 seconds by default. If the Core2 receives no data or heartbeat from the PC for 30 seconds after a connection has been established, it displays `PC disconnected` and `Power off...` briefly, then powers itself off by default. This behavior is controlled by `POWER_OFF_ON_DISCONNECT` in `firmware/src/main.cpp`; set it to `false` to keep the device on and show `OFFLINE` instead.
+The bridge sends a one-second heartbeat independently of the Codex refresh interval. Codex usage is read every 30 seconds by default. If the Core2 receives no data or heartbeat from the PC for 30 seconds after a connection has been established, the LCD is put to sleep while the Core2 remains powered. The next heartbeat or usage message wakes the LCD and redraws the display. `POWER_OFF_ON_DISCONNECT` in `firmware/src/main.cpp` defaults to `false`; set it to `true` if the previous disconnect behavior (show a short message and power off the Core2) is desired.
 
 ## Verification
 

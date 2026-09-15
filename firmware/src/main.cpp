@@ -4,7 +4,7 @@
 namespace {
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t PC_DISCONNECT_AFTER_MS = 30000;
-constexpr bool POWER_OFF_ON_DISCONNECT = true;
+constexpr bool POWER_OFF_ON_DISCONNECT = false;
 constexpr int SCREEN_W = 320;
 constexpr int SCREEN_H = 240;
 
@@ -32,6 +32,7 @@ struct UsageState {
 UsageState state;
 UsageState renderedState;
 bool hasRenderedState = false;
+bool displayAsleep = false;
 String rxLine;
 
 uint16_t colorForPercent(int percent) {
@@ -184,6 +185,24 @@ void refreshScreen() {
   hasRenderedState = true;
 }
 
+void setDisplayAwake(bool awake) {
+  if (awake) {
+    if (!displayAsleep) return;
+    M5.Display.wakeup();
+    displayAsleep = false;
+    // The display controller may have lost its active frame while asleep.
+    // Redraw once after waking; normal updates remain partial redraws.
+    hasRenderedState = false;
+    refreshScreen();
+    return;
+  }
+
+  if (displayAsleep) return;
+  M5.Display.sleep();
+  M5.Display.waitDisplay();
+  displayAsleep = true;
+}
+
 void parseWindow(JsonVariantConst src, WindowInfo& dst) {
   dst.available = src["available"] | false;
   dst.remainingPercent = src["remainingPercent"] | 0;
@@ -205,12 +224,14 @@ void handleJsonLine(const String& line) {
   if (messageType == "codex_heartbeat") {
     state.connected = true;
     state.lastRxMs = millis();
+    setDisplayAwake(true);
     return;
   }
   if (messageType != "codex_usage") return;
 
   state.connected = true;
   state.lastRxMs = millis();
+  setDisplayAwake(true);
   state.valid = doc["ok"] | false;
   state.updated = String((const char*)(doc["updated"] | "--"));
 
@@ -264,13 +285,15 @@ void loop() {
     state.connected = false;
     state.valid = false;
     state.error = "PC disconnected";
-    refreshScreen();
     if (POWER_OFF_ON_DISCONNECT) {
+      refreshScreen();
       delay(700);
       state.error = "Power off...";
       refreshScreen();
       delay(500);
       M5.Power.powerOff();
+    } else {
+      setDisplayAwake(false);
     }
   }
 
