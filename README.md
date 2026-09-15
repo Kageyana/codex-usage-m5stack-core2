@@ -102,7 +102,7 @@ Default refresh interval is 30 seconds. To use 60 seconds:
 python codex_usage_bridge.py --port COM7 --interval 60
 ```
 
-The bridge keeps running when the M5Stack is unplugged and retries the serial connection automatically. To run it from a PowerShell watchdog that also restarts the bridge process after a failure:
+The bridge keeps running when the M5Stack is unplugged and retries the serial connection automatically. USB disconnects are detected by the one-second heartbeat, the serial port is closed, and the bridge waits for the port to return. You do not need to restart Python after reconnecting the Core2. To run it from a PowerShell watchdog that also restarts the bridge process after a failure:
 
 ```powershell
 .\run_bridge.ps1 -Port COM6
@@ -119,6 +119,8 @@ account/rateLimits/read
 ```
 
 No Codex token is stored on the Core2.
+
+If Codex App Server stops or a rate-limit request fails, the bridge closes that process, resolves the current Codex executable again, and repeats the `initialize` / `initialized` handshake after a short retry delay. The serial connection and heartbeat continue while App Server recovery is in progress.
 
 ## Serial JSON format
 
@@ -162,6 +164,16 @@ Credits balance is rounded to the nearest integer for display. A missing or inva
 
 The Core2 renders the fixed layout only once. On later updates it redraws only the changed status, usage window, credits, footer, or error region to reduce display flicker.
 
-The bridge sends a one-second heartbeat independently of the Codex refresh interval. If the Core2 receives no data or heartbeat from the PC for 30 seconds after a connection has been established, it displays a disconnect message and powers itself off.
+The bridge sends a one-second heartbeat independently of the Codex refresh interval. Codex usage is read every 30 seconds by default. If the Core2 receives no data or heartbeat from the PC for 30 seconds after a connection has been established, it displays `PC disconnected` and `Power off...` briefly, then powers itself off by default. This behavior is controlled by `POWER_OFF_ON_DISCONNECT` in `firmware/src/main.cpp`; set it to `false` to keep the device on and show `OFFLINE` instead.
+
+## Verification
+
+Run the bridge tests locally with:
+
+```powershell
+pytest -q
+```
+
+Firmware compilation can be checked locally with `pio run -d firmware`. GitHub Actions runs this in the separate `Firmware build` workflow, while the Python tests run in `Python tests`.
 
 This project intentionally talks to the local Codex app-server instead of reading OAuth files directly.
