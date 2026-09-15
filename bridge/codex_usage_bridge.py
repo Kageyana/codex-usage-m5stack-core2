@@ -63,6 +63,8 @@ class CodexAppServer:
             raise AppServerError(
                 f"Codex CLI not found: {exe}. Install Codex or specify --codex-bin PATH"
             ) from exc
+        except OSError as exc:
+            raise AppServerError(f"Codex app-server failed to start: {exc}") from exc
         proc = self.proc
         assert proc is not None
         self.stdout_thread = threading.Thread(target=self._stdout_loop, args=(proc,), daemon=True)
@@ -96,7 +98,10 @@ class CodexAppServer:
             proc.terminate()
             proc.wait(timeout=2)
         except Exception:
-            proc.kill()
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     def _stdout_loop(self, proc: subprocess.Popen[str]) -> None:
         if proc.stdout is None:

@@ -132,6 +132,16 @@ def test_app_server_write_failure_is_reported_separately():
         app._write({"method": "account/rateLimits/read"})
 
 
+def test_app_server_start_os_error_is_reported_separately(monkeypatch):
+    def fail_start(*_args, **_kwargs):
+        raise PermissionError("process creation denied")
+
+    monkeypatch.setattr(bridge, "resolve_codex_executable", lambda _name: "codex.exe")
+    monkeypatch.setattr(bridge.subprocess, "Popen", fail_start)
+    with pytest.raises(bridge.AppServerError, match="failed to start"):
+        bridge.CodexAppServer().start()
+
+
 def test_app_server_failure_is_recreated_and_recovers():
     class FakeSerialSession:
         def __init__(self, _ser, _serial_exception):
