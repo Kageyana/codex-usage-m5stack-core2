@@ -3,7 +3,7 @@
 
 namespace {
 constexpr uint32_t SERIAL_BAUD = 115200;
-constexpr uint32_t STALE_AFTER_MS = 120000;
+constexpr uint32_t PC_DISCONNECT_AFTER_MS = 30000;
 constexpr int SCREEN_W = 320;
 constexpr int SCREEN_H = 240;
 
@@ -29,6 +29,8 @@ struct UsageState {
 };
 
 UsageState state;
+UsageState renderedState;
+bool hasRenderedState = false;
 String rxLine;
 
 uint16_t colorForPercent(int percent) {
@@ -46,14 +48,28 @@ void drawProgressBar(int x, int y, int w, int h, int percent, uint16_t color) {
   }
 }
 
-void drawWindowCard(int y, const char* title, const WindowInfo& w) {
+bool windowEquals(const WindowInfo& lhs, const WindowInfo& rhs) {
+  return lhs.available == rhs.available &&
+         lhs.remainingPercent == rhs.remainingPercent &&
+         lhs.resetText == rhs.resetText &&
+         lhs.resetInText == rhs.resetInText;
+}
+
+void drawWindowCardFrame(int y, const char* title) {
   M5.Display.drawRoundRect(8, y, 304, 68, 7, TFT_DARKGREY);
   M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.setTextSize(1);
+  M5.Display.setTextSize(2);
   M5.Display.setCursor(18, y + 8);
   M5.Display.print(title);
+}
+
+void drawWindowContent(int y, const WindowInfo& w) {
+  // Keep the title and card frame intact; only clear the changing content.
+  M5.Display.fillRect(16, y + 24, 288, 40, TFT_BLACK);
+  M5.Display.fillRect(234, y + 4, 72, 23, TFT_BLACK);
 
   if (!w.available) {
+    M5.Display.setTextSize(1);
     M5.Display.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
     M5.Display.setCursor(18, y + 30);
     M5.Display.print("Not reported by Codex");
@@ -72,11 +88,12 @@ void drawWindowCard(int y, const char* title, const WindowInfo& w) {
   M5.Display.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
   M5.Display.setCursor(18, y + 50);
   M5.Display.printf("reset in %s", w.resetInText.c_str());
-  M5.Display.setCursor(190, y + 50);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(178, y + 48);
   M5.Display.printf("%s", w.resetText.c_str());
 }
 
-void drawScreen() {
+void drawStaticLayout() {
   M5.Display.fillScreen(TFT_BLACK);
   M5.Display.setTextDatum(top_left);
 
@@ -85,40 +102,85 @@ void drawScreen() {
   M5.Display.setCursor(10, 8);
   M5.Display.print("CODEX USAGE");
 
-  M5.Display.setTextSize(1);
-  M5.Display.setTextColor(state.connected ? TFT_GREEN : TFT_RED, TFT_BLACK);
-  M5.Display.setCursor(244, 11);
-  M5.Display.print(state.connected ? "USB OK" : "OFFLINE");
-
-  drawWindowCard(34, "5 HOUR LIMIT", state.fiveHour);
-  drawWindowCard(108, "WEEKLY LIMIT", state.weekly);
+  drawWindowCardFrame(34, "5 HOUR LIMIT");
+  drawWindowCardFrame(108, "WEEKLY LIMIT");
 
   M5.Display.drawRoundRect(8, 182, 304, 42, 7, TFT_DARKGREY);
-  M5.Display.setTextSize(1);
+  M5.Display.setTextSize(2);
   M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
   M5.Display.setCursor(18, 190);
   M5.Display.print("CREDITS");
+}
+
+void drawConnectionStatus(bool connected) {
+  M5.Display.setTextSize(1);
+  M5.Display.fillRect(238, 6, 72, 20, TFT_BLACK);
+  M5.Display.setTextColor(connected ? TFT_GREEN : TFT_RED, TFT_BLACK);
+  M5.Display.setCursor(244, 11);
+  M5.Display.print(connected ? "USB OK" : "OFFLINE");
+}
+
+void drawCreditsContent(const UsageState& current) {
+  M5.Display.fillRect(108, 185, 200, 24, TFT_BLACK);
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
-  M5.Display.setCursor(80, 188);
-  if (state.creditsUnlimited) {
+  M5.Display.setCursor(112, 188);
+  if (current.creditsUnlimited) {
     M5.Display.print("UNLIMITED");
   } else {
-    M5.Display.print(state.creditsAvailable ? state.creditsBalance : "--");
+    M5.Display.print(current.creditsAvailable ? current.creditsBalance : "--");
   }
+}
 
+void drawFooterContent(const UsageState& current) {
+  M5.Display.fillRect(12, 206, 296, 17, TFT_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
   M5.Display.setCursor(18, 211);
-  M5.Display.printf("Plan: %s", state.plan.c_str());
+  M5.Display.printf("Plan: %s", current.plan.c_str());
   M5.Display.setCursor(184, 211);
-  M5.Display.printf("Updated: %s", state.updated.c_str());
+  M5.Display.printf("Updated: %s", current.updated.c_str());
+}
 
-  if (!state.valid && state.error.length() > 0) {
+void drawErrorContent(const UsageState& current) {
+  M5.Display.fillRect(8, 225, 304, 15, TFT_BLACK);
+  if (!current.valid && current.error.length() > 0) {
     M5.Display.setTextColor(TFT_RED, TFT_BLACK);
     M5.Display.setCursor(10, 228);
-    M5.Display.print(state.error.substring(0, 48));
+    M5.Display.print(current.error.substring(0, 48));
   }
+}
+
+void refreshScreen() {
+  if (!hasRenderedState) {
+    drawStaticLayout();
+  }
+
+  if (!hasRenderedState || state.connected != renderedState.connected) {
+    drawConnectionStatus(state.connected);
+  }
+  if (!hasRenderedState || !windowEquals(state.fiveHour, renderedState.fiveHour)) {
+    drawWindowContent(34, state.fiveHour);
+  }
+  if (!hasRenderedState || !windowEquals(state.weekly, renderedState.weekly)) {
+    drawWindowContent(108, state.weekly);
+  }
+  if (!hasRenderedState || state.creditsAvailable != renderedState.creditsAvailable ||
+      state.creditsUnlimited != renderedState.creditsUnlimited ||
+      state.creditsBalance != renderedState.creditsBalance) {
+    drawCreditsContent(state);
+  }
+  if (!hasRenderedState || state.plan != renderedState.plan ||
+      state.updated != renderedState.updated) {
+    drawFooterContent(state);
+  }
+  if (!hasRenderedState || state.valid != renderedState.valid ||
+      state.error != renderedState.error) {
+    drawErrorContent(state);
+  }
+
+  renderedState = state;
+  hasRenderedState = true;
 }
 
 void parseWindow(JsonVariantConst src, WindowInfo& dst) {
@@ -134,11 +196,17 @@ void handleJsonLine(const String& line) {
   if (err) {
     state.valid = false;
     state.error = "Bad JSON from PC";
-    drawScreen();
+    refreshScreen();
     return;
   }
 
-  if (String((const char*)(doc["type"] | "")) != "codex_usage") return;
+  String messageType = String((const char*)(doc["type"] | ""));
+  if (messageType == "codex_heartbeat") {
+    state.connected = true;
+    state.lastRxMs = millis();
+    return;
+  }
+  if (messageType != "codex_usage") return;
 
   state.connected = true;
   state.lastRxMs = millis();
@@ -147,7 +215,7 @@ void handleJsonLine(const String& line) {
 
   if (!state.valid) {
     state.error = String((const char*)(doc["error"] | "Codex read failed"));
-    drawScreen();
+    refreshScreen();
     return;
   }
 
@@ -160,7 +228,7 @@ void handleJsonLine(const String& line) {
   state.creditsUnlimited = credits["unlimited"] | false;
   state.creditsBalance = String((const char*)(credits["balance"] | "--"));
   state.plan = String((const char*)(doc["plan"] | "--"));
-  drawScreen();
+  refreshScreen();
 }
 }  // namespace
 
@@ -173,7 +241,7 @@ void setup() {
 
   Serial.begin(SERIAL_BAUD);
   rxLine.reserve(768);
-  drawScreen();
+  refreshScreen();
 }
 
 void loop() {
@@ -191,11 +259,13 @@ void loop() {
     }
   }
 
-  if (state.connected && millis() - state.lastRxMs > STALE_AFTER_MS) {
+  if (state.connected && millis() - state.lastRxMs > PC_DISCONNECT_AFTER_MS) {
     state.connected = false;
     state.valid = false;
-    state.error = "PC data is stale";
-    drawScreen();
+    state.error = "PC disconnected; powering off";
+    refreshScreen();
+    delay(100);
+    M5.Power.powerOff();
   }
 
   delay(5);
