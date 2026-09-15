@@ -4,6 +4,7 @@
 namespace {
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t PC_DISCONNECT_AFTER_MS = 30000;
+constexpr bool POWER_OFF_ON_DISCONNECT = true;
 constexpr int SCREEN_W = 320;
 constexpr int SCREEN_H = 240;
 
@@ -262,10 +263,15 @@ void loop() {
   if (state.connected && millis() - state.lastRxMs > PC_DISCONNECT_AFTER_MS) {
     state.connected = false;
     state.valid = false;
-    state.error = "PC disconnected; powering off";
+    state.error = "PC disconnected";
     refreshScreen();
-    delay(100);
-    M5.Power.powerOff();
+    if (POWER_OFF_ON_DISCONNECT) {
+      delay(700);
+      state.error = "Power off...";
+      refreshScreen();
+      delay(500);
+      M5.Power.powerOff();
+    }
   }
 
   delay(5);
