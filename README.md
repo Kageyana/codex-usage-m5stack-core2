@@ -174,6 +174,6 @@ Run the bridge tests locally with:
 pytest -q
 ```
 
-Firmware compilation can be checked locally with `pio run -d firmware`. GitHub Actions runs this in the separate `Firmware build` workflow, while the Python tests run in `Python tests`.
+Firmware compilation can be checked locally with `pio run -d firmware`. The Python test workflow remains available separately.
 
 This project intentionally talks to the local Codex app-server instead of reading OAuth files directly.
