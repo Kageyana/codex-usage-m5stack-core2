@@ -1,0 +1,14 @@
+name: PowerShell bridge checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check bridge payload handling
+        shell: pwsh
+        run: ./tests/test_bridge.ps1

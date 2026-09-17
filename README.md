@@ -2,7 +2,7 @@
 
 Display Codex account usage on an M5Stack Core2 (320x240) connected to a Windows PC by USB-C.
 
-The PC keeps Codex authentication local. A small Python bridge launches `codex app-server`, reads `account/rateLimits/read`, converts the result into a compact JSON message, and sends it over the Core2 USB serial port.
+The PC keeps Codex authentication local. A PowerShell bridge launches `codex app-server`, reads `account/rateLimits/read`, converts the result into a compact JSON message, and sends it over the Core2 USB serial port.
 
 ## Displayed values
 
@@ -20,11 +20,11 @@ The bridge identifies windows by `windowDurationMins` rather than assuming that 
 firmware/                   PlatformIO project for M5Stack Core2
   platformio.ini
   src/main.cpp
-bridge/                     Windows-side Python bridge
-  codex_usage_bridge.py
-  requirements.txt
+bridge/                     Windows-side PowerShell bridge
+  codex_usage_bridge.ps1
+  run_bridge.ps1
 tests/
-  test_bridge.py
+  test_bridge.ps1
 ```
 
 ## Requirements
@@ -33,7 +33,7 @@ tests/
 
 - Windows 11
 - Codex CLI installed and logged in (`codex` command available)
-- Python 3.11+ recommended
+- Windows PowerShell 5.1 or PowerShell 7
 - USB data cable
 
 ### M5Stack Core2
@@ -55,37 +55,30 @@ cd firmware
 pio run -t upload
 ```
 
-The USB serial baud rate is 115200.
+After flashing and rebooting, the Core2 should show the `CODEX USAGE` screen with `OFFLINE` status even when the PC bridge is stopped. The USB serial baud rate is 115200.
 
-## 2. Install the PC bridge
+## 2. Check the PC bridge
 
-```powershell
-cd bridge
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
-Check that Codex is available:
+The bridge uses Windows PowerShell and .NET's built-in serial support; it has no Python package dependencies. Check that Codex is available:
 
 ```powershell
 codex --version
 ```
 
-If `codex` is not on PATH, the Windows bridge also searches the standard Codex Desktop installation directory. Use `--codex-bin PATH` to override it.
+If `codex` is not on PATH, the Windows bridge also searches the standard Codex Desktop installation directory. Use `-CodexBin PATH` to override it.
 
 ## 3. Test the display without Codex
 
-The bridge can auto-detect common Core2 USB serial chips. If auto-detection fails, specify `--port COM7` (replace with your port).
+The bridge can auto-detect common Core2 USB serial chips. Select the USB serial device in Device Manager if you need to specify a port. On the current PC, the Core2's CH9102 adapter is COM6; COM7 is a Bluetooth port.
 
 ```powershell
-python codex_usage_bridge.py --demo
+.\bridge\run_bridge.ps1 -Demo
 ```
 
-or:
+If port detection does not select the Core2, specify its COM port (COM numbers vary by PC):
 
 ```powershell
-python codex_usage_bridge.py --demo --port COM7
+.\bridge\run_bridge.ps1 -Demo -Port COM6
 ```
 
 You should see example 5-hour, weekly and credit values on the Core2.
@@ -93,22 +86,18 @@ You should see example 5-hour, weekly and credit values on the Core2.
 ## 4. Run with real Codex data
 
 ```powershell
-python codex_usage_bridge.py --port COM7
+.\bridge\run_bridge.ps1 -Port COM6
 ```
 
 Default refresh interval is 30 seconds. To use 60 seconds:
 
 ```powershell
-python codex_usage_bridge.py --port COM7 --interval 60
+.\bridge\run_bridge.ps1 -Port COM6 -Interval 60
 ```
 
-The bridge keeps running when the M5Stack is unplugged and retries the serial connection automatically. USB disconnects are detected by the one-second heartbeat, the serial port is closed, and the bridge waits for the port to return. You do not need to restart Python after reconnecting the Core2. To run it from a PowerShell watchdog that also restarts the bridge process after a failure:
+The bridge keeps running when the M5Stack is unplugged and retries the serial connection automatically. USB disconnects are detected by the one-second heartbeat, the serial port is closed, and the bridge waits for the port to return.
 
-```powershell
-.\run_bridge.ps1 -Port COM6
-```
-
-The watchdog checks the COM port every two seconds. Stop it with `Ctrl+C`.
+Stop it with `Ctrl+C`.
 
 The bridge performs the app-server handshake and calls:
 
@@ -168,12 +157,12 @@ The bridge sends a one-second heartbeat independently of the Codex refresh inter
 
 ## Verification
 
-Run the bridge tests locally with:
+Run the bridge payload checks locally with:
 
 ```powershell
-pytest -q
+powershell -NoProfile -File tests\test_bridge.ps1
 ```
 
-Firmware compilation can be checked locally with `pio run -d firmware`. The Python test workflow remains available separately.
+Firmware compilation can be checked locally with `pio run -d firmware`.
 
 This project intentionally talks to the local Codex app-server instead of reading OAuth files directly.
