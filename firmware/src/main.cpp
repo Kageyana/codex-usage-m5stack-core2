@@ -4,7 +4,11 @@
 namespace {
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t PC_DISCONNECT_AFTER_MS = 30000;
+constexpr uint32_t SERIAL_RECOVERY_AFTER_MS = 5000;
+constexpr uint32_t SERIAL_RECOVERY_INTERVAL_MS = 5000;
 constexpr bool POWER_OFF_ON_DISCONNECT = false;
+constexpr bool SLEEP_DISPLAY_ON_DISCONNECT = true;
+constexpr uint8_t DISPLAY_BRIGHTNESS = 120;
 constexpr int SCREEN_W = 320;
 constexpr int SCREEN_H = 240;
 
@@ -55,6 +59,23 @@ bool windowEquals(const WindowInfo& lhs, const WindowInfo& rhs) {
          lhs.remainingPercent == rhs.remainingPercent &&
          lhs.resetText == rhs.resetText &&
          lhs.resetInText == rhs.resetInText;
+}
+
+void recoverSerialIfStale() {
+  static uint32_t lastRecoveryMs = 0;
+  const uint32_t now = millis();
+  if (now - state.lastRxMs < SERIAL_RECOVERY_AFTER_MS) return;
+  if (now - lastRecoveryMs < SERIAL_RECOVERY_INTERVAL_MS) return;
+
+  // USB unplug/replug can leave the UART peripheral alive but no longer
+  // receiving bytes. Reinitializing the UART is less disruptive than a full
+  // ESP32 reset and allows the next bridge heartbeat to reconnect it.
+  Serial.flush();
+  Serial.end();
+  delay(20);
+  Serial.begin(SERIAL_BAUD);
+  rxLine = "";
+  lastRecoveryMs = now;
 }
 
 void drawWindowCardFrame(int y, const char* title) {
@@ -189,6 +210,7 @@ void setDisplayAwake(bool awake) {
   if (awake) {
     if (!displayAsleep) return;
     M5.Display.wakeup();
+    M5.Display.setBrightness(DISPLAY_BRIGHTNESS);
     displayAsleep = false;
     // The display controller may have lost its active frame while asleep.
     // Redraw once after waking; normal updates remain partial redraws.
@@ -223,8 +245,13 @@ void handleJsonLine(const String& line) {
   String messageType = String((const char*)(doc["type"] | ""));
   if (messageType == "codex_heartbeat") {
     state.connected = true;
+    state.error = "";
     state.lastRxMs = millis();
     setDisplayAwake(true);
+    // Heartbeats can be the first message after a USB reconnect.  Redraw
+    // here so the stale OFFLINE indicator is cleared immediately even when
+    // no usage payload has arrived yet.
+    refreshScreen();
     return;
   }
   if (messageType != "codex_usage") return;
@@ -258,16 +285,21 @@ void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
   M5.Display.setRotation(1);
-  M5.Display.setBrightness(120);
+  M5.Display.wakeup();
+  M5.Display.setBrightness(DISPLAY_BRIGHTNESS);
   M5.Display.setTextWrap(false);
 
   Serial.begin(SERIAL_BAUD);
   rxLine.reserve(768);
   refreshScreen();
+  if (SLEEP_DISPLAY_ON_DISCONNECT) {
+    setDisplayAwake(false);
+  }
 }
 
 void loop() {
   M5.update();
+  recoverSerialIfStale();
 
   while (Serial.available() > 0) {
     char ch = static_cast<char>(Serial.read());
@@ -285,16 +317,20 @@ void loop() {
     state.connected = false;
     state.valid = false;
     state.error = "PC disconnected";
-    if (POWER_OFF_ON_DISCONNECT) {
-      refreshScreen();
-      delay(700);
-      state.error = "Power off...";
-      refreshScreen();
-      delay(500);
-      M5.Power.powerOff();
-    } else {
-      setDisplayAwake(false);
-    }
+      if (POWER_OFF_ON_DISCONNECT) {
+        refreshScreen();
+        delay(700);
+        state.error = "Power off...";
+        refreshScreen();
+        delay(500);
+        M5.Power.powerOff();
+      } else if (SLEEP_DISPLAY_ON_DISCONNECT) {
+        setDisplayAwake(false);
+      } else {
+        // Keep the last layout visible so reconnect does not depend on
+        // display-controller sleep/wakeup behavior.
+        refreshScreen();
+      }
   }
 
   delay(5);

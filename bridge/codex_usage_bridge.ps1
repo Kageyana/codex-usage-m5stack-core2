@@ -249,11 +249,58 @@ function Resolve-CodexExecutable {
     return $Name
 }
 
+function Test-SerialPortPresent {
+    param([Parameter(Mandatory)][string]$PortName)
+
+    try {
+        return @([IO.Ports.SerialPort]::GetPortNames()) -contains $PortName
+    } catch {
+        return $false
+    }
+}
+
+function Set-SerialModemState {
+    param(
+        [Parameter(Mandatory)][object]$Connection,
+        [Parameter(Mandatory)][bool]$Dtr,
+        [Parameter(Mandatory)][bool]$Rts
+    )
+
+    $Connection.DtrEnable = $Dtr
+    $Connection.RtsEnable = $Rts
+    # Some Windows USB serial drivers only propagate RTS after the current
+    # DTR state is written again.
+    $Connection.DtrEnable = $Dtr
+}
+
+function Reset-Core2SerialTarget {
+    param([Parameter(Mandatory)][object]$Connection)
+
+    # Core2 exposes the ESP32 reset control through the USB-UART modem
+    # control lines.  A USB unplug/replug can leave the ESP32 serial driver
+    # wedged while the COM port itself remains available.  Pulse RTS after
+    # opening the port so the application starts receiving again without a
+    # physical reset-button press.
+    try {
+        Set-SerialModemState -Connection $Connection -Dtr $false -Rts $false
+        Set-SerialModemState -Connection $Connection -Dtr $false -Rts $true
+        Start-Sleep -Milliseconds 120
+        Set-SerialModemState -Connection $Connection -Dtr $false -Rts $false
+        Start-Sleep -Milliseconds 1200
+    } catch {
+        throw [IO.IOException]::new("M5Stack reset pulse failed: $($_.Exception.Message)", $_.Exception)
+    }
+}
+
 function Write-SerialMessage {
     param([Parameter(Mandatory)][object]$Message)
 
     if ($null -eq $script:SerialPort -or -not $script:SerialPort.IsOpen) {
         throw [IO.IOException]::new("serial port is not open")
+    }
+    $portProperty = $script:SerialPort.PSObject.Properties["PortName"]
+    if ($null -ne $portProperty -and $portProperty.Value -and -not (Test-SerialPortPresent -PortName ([string]$portProperty.Value))) {
+        throw [IO.IOException]::new("serial port disappeared: $($portProperty.Value)")
     }
     $json = ConvertTo-Json -InputObject $Message -Compress -Depth 20
     try {
@@ -429,6 +476,33 @@ function Invoke-CodexRequest {
     throw [InvalidOperationException]::new("Timeout waiting for $Method")
 }
 
+function Get-RegistrySerialPortCandidates {
+    param([Parameter(Mandatory)][string[]]$Ports)
+
+    # Some Windows installations cannot query Win32_SerialPort without
+    # elevated WMI access, or expose the adapter with a generic description.
+    # CH9102 is commonly registered as VID_1A86&PID_55D4, so use the USB
+    # registry as a read-only fallback for the known USB-serial vendors.
+    $knownVendors = @("VID_1A86", "VID_10C4", "VID_0403")
+    $result = [System.Collections.Generic.List[string]]::new()
+    try {
+        $usbRoot = "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB"
+        foreach ($deviceKey in (Get-ChildItem -LiteralPath $usbRoot -ErrorAction Stop)) {
+            $vendor = (($deviceKey.PSChildName -split "&")[0]).ToUpperInvariant()
+            if ($knownVendors -notcontains $vendor) { continue }
+            foreach ($parametersKey in (Get-ChildItem -LiteralPath $deviceKey.PSPath -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -eq "Device Parameters" })) {
+                $portName = [string](Get-ItemProperty -LiteralPath $parametersKey.PSPath -Name PortName -ErrorAction SilentlyContinue).PortName
+                if ($portName -and ($Ports -contains $portName) -and -not $result.Contains($portName)) {
+                    $result.Add($portName)
+                }
+            }
+        }
+    } catch {
+        Write-Verbose "Could not read USB serial registry entries: $($_.Exception.Message)"
+    }
+    return @($result)
+}
+
 function Get-Core2Port {
     param([AllowEmptyString()][string]$ExplicitPort)
 
@@ -450,7 +524,8 @@ function Get-Core2Port {
     } catch {
         Write-Verbose "Could not read serial device descriptions: $($_.Exception.Message)"
     }
-    $candidates = @($candidateNames | Where-Object { $ports -contains $_ } | Select-Object -Unique)
+    $registryCandidates = @(Get-RegistrySerialPortCandidates -Ports $ports)
+    $candidates = @($candidateNames + $registryCandidates | Where-Object { $ports -contains $_ } | Select-Object -Unique)
     if ($candidates.Count -eq 1) { return $candidates[0] }
     if ($candidates.Count -gt 1) {
         [Console]::Error.WriteLine("[SERIAL] multiple M5Stack candidate ports: {0}; specify -Port", ($candidates -join ", "))
@@ -641,8 +716,15 @@ while ($true) {
         $connection.Encoding = [Text.UTF8Encoding]::new($false)
         $connection.NewLine = "`n"
         $connection.WriteTimeout = 2000
-        $connection.DtrEnable = $true
+        # Do not hold the Core2's USB-UART reset control line while the
+        # application is running.  The board can remain powered from its
+        # battery when USB is unplugged, so an asserted modem-control line
+        # can leave the ESP32 unable to receive after reconnect.
+        $connection.DtrEnable = $false
+        $connection.RtsEnable = $false
         $connection.Open()
+        Write-Host "[SERIAL] resetting Core2 target"
+        Reset-Core2SerialTarget -Connection $connection
         Invoke-SerialSession -Connection $connection
     } catch {
         [Console]::Error.WriteLine("[SERIAL] disconnected: {0}" -f $_.Exception.Message)
